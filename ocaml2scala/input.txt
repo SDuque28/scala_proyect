@@ -1,0 +1,12 @@
+let double x = x * 2
+
+let rec factorial n =
+  if n <= 1 then 1
+  else n * factorial (n - 1)
+
+let main () =
+  let x = 5 in
+  Printf.printf "Double of %d is %d\n" x (double x);
+  Printf.printf "Factorial of %d is %d\n" x (factorial x)
+
+let _ = main ()
