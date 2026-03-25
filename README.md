@@ -5,12 +5,11 @@ Small Scala project for a university assignment. It reads simple OCaml code from
 ## Project structure
 
 ```text
-ocaml2scala/
-|-- src/
-|   `-- Main.scala
-|-- input.txt
-|-- build.sbt
-`-- README.md
+src/
+| -- Main.scala
+input.txt
+ build.sbt
+README.md
 ```
 
 ## What it does
@@ -37,8 +36,6 @@ The program:
 This translator is intentionally small and beginner-friendly, so it does not support all OCaml syntax.
 
 ## How to run
-
-From inside the `ocaml2scala` folder:
 
 ```bash
 scalac src/Main.scala
