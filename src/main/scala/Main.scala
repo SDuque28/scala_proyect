@@ -1,16 +1,24 @@
+//> using scala 2.13.14
+
 import scala.io.Source
 import java.io.File
 import java.io.PrintWriter
+import java.net.URLClassLoader
 import scala.sys.process._
 
 object Main {
 
   def main(args: Array[String]): Unit = {
     val inputFile = if (args.nonEmpty) args(0) else "input.txt"
-    val scalaOutputFile = "output.scala"
-    val textOutputFile = "translated_code.txt"
+    val generatedDir = "generated"
+    val scalaOutputFile = s"$generatedDir/output.scala"
+    val textOutputFile = s"$generatedDir/translated_code.txt"
+    val compiledOutputDir = s"$generatedDir/classes"
 
     try {
+      ensureDirectoryExists(generatedDir)
+      ensureDirectoryExists(compiledOutputDir)
+
       val ocamlCode = readFile(inputFile)
       val scalaCode = translateOcamlToScala(ocamlCode)
 
@@ -21,7 +29,9 @@ object Main {
       println(scalaCode)
       println()
 
-      compileScalaFile(scalaOutputFile)
+      if (compileScalaFile(scalaOutputFile, compiledOutputDir)) {
+        runGeneratedCode(compiledOutputDir)
+      }
     } catch {
       case e: Exception =>
         println("An error happened: " + e.getMessage)
@@ -46,26 +56,74 @@ object Main {
     }
   }
 
-  def compileScalaFile(path: String): Unit = {
-    val outputBuffer = new StringBuilder
-    val logger = ProcessLogger(
-      line => outputBuffer.append(line).append("\n"),
-      line => outputBuffer.append(line).append("\n")
+  def ensureDirectoryExists(path: String): Unit = {
+    val directory = new File(path)
+    if (!directory.exists()) {
+      directory.mkdirs()
+    }
+  }
+
+  def shellCommand(parts: String*): Seq[String] = {
+    val isWindows = System.getProperty("os.name").toLowerCase.contains("win")
+    if (isWindows) Seq("cmd", "/c") ++ parts
+    else parts
+  }
+
+  def compileScalaFile(path: String, outputDir: String): Boolean = {
+    val compilerAttempts = List(
+      ("scalac", shellCommand("scalac", "-d", outputDir, path)),
+      ("Scala CLI", shellCommand("scala", "compile", "--scala-version", "2.13.14", path))
+    )
+
+    val attemptResult = compilerAttempts.iterator.map {
+      case (compilerName, command) =>
+        val outputBuffer = new StringBuilder
+        val logger = ProcessLogger(
+          line => outputBuffer.append(line).append("\n"),
+          line => outputBuffer.append(line).append("\n")
+        )
+
+        try {
+          Some((compilerName, command.!(logger), outputBuffer.toString()))
+        } catch {
+          case _: Exception => None
+        }
+    }.collectFirst {
+      case Some(result) => result
+    }
+
+    attemptResult match {
+      case Some((_, 0, _)) =>
+        true
+      case Some((compilerName, _, output)) =>
+        println(s"Compilation failed ($compilerName)")
+        println("Compiler output:")
+        println(output)
+        false
+      case None =>
+        println("Could not run a Scala compiler. Install scalac or use Scala CLI.")
+        false
+    }
+  }
+
+  def runGeneratedCode(compiledOutputDir: String): Unit = {
+    val loader = new URLClassLoader(
+      Array(new File(compiledOutputDir).toURI.toURL),
+      getClass.getClassLoader
     )
 
     try {
-      val exitCode = Seq("scalac", path).!(logger)
+      val moduleClass = loader.loadClass("TranslatedCode$")
+      val module = moduleClass.getField("MODULE$").get(null)
+      val mainMethod = moduleClass.getMethod("main", classOf[Array[String]])
 
-      if (exitCode == 0) {
-        println("Compilation successful")
-      } else {
-        println("Compilation failed")
-        println("Compiler output:")
-        println(outputBuffer.toString())
-      }
+      println("Generated program output:")
+      mainMethod.invoke(module, Array.empty[String].asInstanceOf[AnyRef])
     } catch {
       case e: Exception =>
-        println("Could not run scalac: " + e.getMessage)
+        println("Could not run generated code: " + e.getMessage)
+    } finally {
+      loader.close()
     }
   }
 
@@ -262,11 +320,21 @@ object Main {
 
     cleaned match {
       case pattern(formatText, rawArgs) =>
-        val args = splitArguments(rawArgs.trim).map(arg => translateExpression(removeParentheses(arg)))
+        val args = splitArguments(rawArgs.trim).map(arg => normalizePrintfArgument(arg))
         val scalaText = buildInterpolatedString(formatText, args)
         s"""println($scalaText)"""
       case _ =>
         "// Could not translate Printf.printf: " + line.trim
+    }
+  }
+
+  def normalizePrintfArgument(arg: String): String = {
+    val translated = translateExpression(removeParentheses(arg))
+    val simpleFunctionApplication = """([a-zA-Z_]\w*) ([a-zA-Z_]\w*)""".r
+
+    translated match {
+      case simpleFunctionApplication(name, value) => s"$name($value)"
+      case _                                      => translated
     }
   }
 

@@ -1,51 +1,110 @@
 # ocaml2scala
 
-Small Scala project for a university assignment. It reads simple OCaml code from a `.txt` file, translates it into Scala, writes the result to output files, and tries to compile the generated Scala code with `scalac`.
+`ocaml2scala` is a small Scala university project that translates a limited subset of OCaml-like code into Scala, writes the generated source to disk, and then tries to compile that generated file.
 
-## Project structure
+## What It Does
+
+The entry point is [`src/main/scala/Main.scala`](./src/main/scala/Main.scala). When you run it, it:
+
+1. reads an OCaml-like input file, defaulting to `input.txt`
+2. translates supported declarations and expressions into Scala
+3. wraps the result inside `object TranslatedCode`
+4. writes generated files into `generated/`
+5. validates the generated Scala file with `scalac`, or falls back to Scala CLI when `scalac` is not installed
+6. runs the generated Scala program automatically
+7. prints the translated code and the generated program output
+
+## Supported OCaml Constructs
+
+The translator currently handles:
+
+- top-level `let` value declarations
+- single-parameter functions defined with `let`
+- recursive functions defined with `let rec`
+- `let main () = ...` blocks converted into Scala `main`
+- local `let ... in` assignments inside `main`
+- `if ... then ...` expressions and simple `else` lines
+- `print_endline` translated to `println`
+- basic `Printf.printf` calls translated to Scala string interpolation
+- OCaml function application such as `factorial (n - 1)` and simple cases like `double x` inside `Printf.printf`
+
+Because the implementation is regex-based and line-oriented, it works best with simple, well-structured input similar to the sample file in this repository.
+
+## Clean Project Layout
 
 ```text
-src/
-| -- Main.scala
+src/main/scala/Main.scala
+docs/DOCUMENTATION.md
 input.txt
- build.sbt
+build.sbt
 README.md
+generated/                # created when you run the translator
+target/                   # created by sbt, ignored
 ```
 
-## What it does
+## How To Run
 
-The program:
-
-1. Reads an OCaml file from the command line, or uses `input.txt` if no path is given.
-2. Translates some common OCaml constructs into simple Scala.
-3. Saves the generated code to:
-   - `output.scala`
-   - `translated_code.txt`
-4. Runs `scalac output.scala` to check whether the translated code compiles.
-5. Prints whether compilation was successful or shows the compiler errors.
-
-## Supported translations
-
-- `let` bindings to `val`
-- `let rec` to recursive `def`
-- `if ... then ... else` to Scala `if (...) ... else ...`
-- `print_endline` to `println`
-- simple `Printf.printf` cases to Scala string interpolation
-- simple arithmetic and function calls
-
-This translator is intentionally small and beginner-friendly, so it does not support all OCaml syntax.
-
-## How to run
+Preferred workflow with SBT:
 
 ```bash
-scalac src/Main.scala
-scala Main
+sbt --error run
 ```
 
-Note: these commands require Scala tools to be installed and available in your terminal path.
-
-Or with a custom input file:
+Run with a custom input file:
 
 ```bash
-scala Main my_ocaml_code.txt
+sbt --error "run my_ocaml_code.txt"
 ```
+
+If you prefer Scala CLI:
+
+```bash
+scala run src/main/scala/Main.scala
+scala run src/main/scala/Main.scala -- my_ocaml_code.txt
+```
+
+`sbt --error` keeps the SBT output much quieter so you mostly see your program's output.
+
+## How To Clean Generated Files
+
+Remove SBT build output:
+
+```bash
+sbt clean
+```
+
+Remove translator-generated files:
+
+```bash
+Remove-Item -Recurse -Force generated
+```
+
+The repo now ignores generated compiler output, Scala CLI cache folders, and SBT `target/` directories through [`.gitignore`](./.gitignore).
+
+## Output Files
+
+After execution, the translator creates:
+
+- `generated/output.scala`: generated Scala source
+- `generated/translated_code.txt`: the same source with a short header comment
+- `generated/classes/`: compiled classes produced by `scalac -d`
+
+## Testing Status
+
+There are currently no automated tests in the project. The simplest verification flow is:
+
+```bash
+sbt run
+```
+
+or:
+
+```bash
+scala run src/main/scala/Main.scala
+```
+
+If the generated code compiles, the program prints `Compilation successful`.
+
+## Additional Documentation
+
+For a deeper explanation of the translator internals and helper functions, see [`docs/DOCUMENTATION.md`](./docs/DOCUMENTATION.md).
