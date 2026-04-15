@@ -21,12 +21,18 @@ The translator currently handles:
 - top-level `let` value declarations
 - single-parameter functions defined with `let`
 - recursive functions defined with `let rec`
-- `let main () = ...` blocks converted into Scala `main`
+- typed function headers such as `let f (x : int) : int = ...`
+- `let main () = ...` and `let main () : unit = ...` blocks converted into Scala `main`
+- `let _ = main ()` and `let () = main ()` entrypoints
 - local `let ... in` assignments inside `main`
+- mutable refs via `ref`, `!value`, and `:=`
+- `while ... do ... done` loops inside `main`
 - `if ... then ...` expressions and simple `else` lines
 - `print_endline` translated to `println`
+- string concatenation with `^`
+- common OCaml helpers such as `string_of_int`
 - basic `Printf.printf` calls translated to Scala string interpolation
-- OCaml function application such as `factorial (n - 1)` and simple cases like `double x` inside `Printf.printf`
+- OCaml function application such as `factorial (n - 1)`, `double x`, or `mostrarMensaje "hola"`
 
 Because the implementation is regex-based and line-oriented, it works best with simple, well-structured input similar to the sample file in this repository.
 

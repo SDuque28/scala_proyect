@@ -23,7 +23,7 @@ object Main {
       val scalaCode = translateOcamlToScala(ocamlCode)
 
       writeFile(scalaOutputFile, scalaCode)
-      writeFile(textOutputFile, "// Translated from OCaml code\n\n" + scalaCode)
+      writeFile(textOutputFile, scalaCode)
 
       println("Generated Scala code:")
       println(scalaCode)
@@ -153,6 +153,7 @@ object Main {
     val rawLines = code.replace("\r", "").split("\n").toList
     val blocks = scala.collection.mutable.ListBuffer[List[String]]()
     var current = scala.collection.mutable.ListBuffer[String]()
+    var groupingDepth = 0
 
     for (line <- rawLines) {
       val trimmed = line.trim
@@ -160,9 +161,10 @@ object Main {
         trimmed.startsWith("let ") &&
           !line.startsWith(" ") &&
           !line.startsWith("\t") &&
+          groupingDepth == 0 &&
           current.nonEmpty
 
-      if (trimmed.isEmpty) {
+      if (trimmed.isEmpty && groupingDepth == 0) {
         if (current.nonEmpty) {
           blocks += current.toList
           current.clear()
@@ -174,6 +176,8 @@ object Main {
       } else {
         current += line
       }
+
+      groupingDepth = math.max(0, groupingDepth + countGroupingDelta(line))
     }
 
     if (current.nonEmpty) {
@@ -186,11 +190,11 @@ object Main {
   def translateBlock(block: List[String]): List[String] = {
     val header = block.head.trim
 
-    if (header == "let _ = main ()") {
+    if (isMainInvocation(header)) {
       Nil
     } else if (header.startsWith("let rec ")) {
       translateRecursiveBlock(block)
-    } else if (header.startsWith("let main () =")) {
+    } else if (isMainDefinition(header)) {
       translateMainBlock(block)
     } else if (header.startsWith("let ")) {
       translateNormalLetBlock(block)
@@ -201,21 +205,21 @@ object Main {
 
   def translateRecursiveBlock(block: List[String]): List[String] = {
     val header = block.head.trim
-    val pattern = """let rec ([a-zA-Z_]\w*) ([a-zA-Z_]\w*) =""".r
+    parseFunctionHeader(header, isRecursive = true) match {
+      case Some(signature) =>
+        val body =
+          bodyFromHeader(signature.inlineExpression).getOrElse(block.tail.map(_.trim).filter(_.nonEmpty))
 
-    header match {
-      case pattern(name, param) =>
-        val body = block.tail.map(_.trim).filter(_.nonEmpty).flatMap(translateBodyLine)
-        List(s"def $name($param: Int): Int = {") ++
-          body.map("  " + _) ++
-          List("}")
-      case _ =>
+        renderFunction(signature.name, signature.paramName, signature.paramType, signature.returnType, body)
+
+      case None =>
         List("// Could not translate recursive function: " + header)
     }
   }
 
   def translateMainBlock(block: List[String]): List[String] = {
-    val body = block.tail.map(_.trim).filter(_.nonEmpty).flatMap(translateMainLine)
+    val lines = block.tail.map(_.trim).filter(_.nonEmpty)
+    val (body, _) = translateStatementSequence(lines, 0, stopAtDone = false)
 
     List("def main(args: Array[String]): Unit = {") ++
       body.map("  " + _) ++
@@ -224,63 +228,79 @@ object Main {
 
   def translateNormalLetBlock(block: List[String]): List[String] = {
     val header = block.head.trim
-    val functionWithExpr = """let ([a-zA-Z_]\w*) ([a-zA-Z_]\w*) = (.+)""".r
-    val functionHeaderOnly = """let ([a-zA-Z_]\w*) ([a-zA-Z_]\w*) =""".r
     val valuePattern = """let ([a-zA-Z_]\w*) = (.+)""".r
 
-    header match {
-      case functionWithExpr(name, param, expr) =>
-        List(s"def $name($param: Int): Int = ${translateExpression(expr)}")
+    parseFunctionHeader(header, isRecursive = false) match {
+      case Some(signature) =>
+        val body =
+          bodyFromHeader(signature.inlineExpression).getOrElse(block.tail.map(_.trim).filter(_.nonEmpty))
 
-      case functionHeaderOnly(name, param) =>
-        val body = block.tail.map(_.trim).filter(_.nonEmpty).flatMap(translateBodyLine)
-        List(s"def $name($param: Int): Int = {") ++
-          body.map("  " + _) ++
-          List("}")
+        renderFunction(signature.name, signature.paramName, signature.paramType, signature.returnType, body)
 
-      case valuePattern(name, expr) =>
-        List(s"val $name = ${translateExpression(expr)}")
+      case None =>
+        header match {
+          case valuePattern(name, expr) =>
+            List(s"val $name = ${translateExpression(expr)}")
 
-      case _ =>
-        List("// Could not translate let binding: " + header)
+          case _ =>
+            List("// Could not translate let binding: " + header)
+        }
     }
   }
 
   def translateBodyLine(line: String): List[String] = {
-    if (line.startsWith("if ")) {
-      List(translateIfLine(line))
+    val normalized = normalizeStatementLine(line)
+
+    if (normalized.startsWith("if ")) {
+      List(translateIfLine(normalized))
+    } else if (normalized.startsWith("Printf.printf")) {
+      List(translatePrintf(normalized))
+    } else if (normalized.startsWith("print_endline")) {
+      List(translatePrintEndline(normalized))
+    } else if (normalized.contains(":=")) {
+      List(translateAssignment(normalized))
+    } else if (normalized == "done") {
+      Nil
+    } else if (normalized.isEmpty) {
+      Nil
     } else if (line.startsWith("else ")) {
       List("else " + translateExpression(line.stripPrefix("else ").trim))
     } else if (line.startsWith("match ")) {
       translateMatchLine(line)
     } else {
-      List(translateExpression(line))
+      List(translateExpression(normalized))
     }
   }
 
   def translateMainLine(line: String): List[String] = {
-    if (line.startsWith("let ")) {
-      List(translateLocalLet(line))
-    } else if (line.startsWith("Printf.printf")) {
-      List(translatePrintf(line))
-    } else if (line.startsWith("print_endline")) {
-      List(translatePrintEndline(line))
-    } else if (line.startsWith("if ")) {
-      List(translateIfLine(line))
+    val normalized = normalizeStatementLine(line)
+
+    if (normalized.startsWith("let ")) {
+      List(translateLocalLet(normalized))
+    } else if (normalized.startsWith("Printf.printf")) {
+      List(translatePrintf(normalized))
+    } else if (normalized.startsWith("print_endline")) {
+      List(translatePrintEndline(normalized))
+    } else if (normalized.startsWith("if ")) {
+      List(translateIfLine(normalized))
+    } else if (normalized.contains(":=")) {
+      List(translateAssignment(normalized))
+    } else if (normalized == "done" || normalized.isEmpty) {
+      Nil
     } else {
-      List(translateExpression(line))
+      List(translateExpression(normalized))
     }
   }
 
   def translateLocalLet(line: String): String = {
-    val withInPattern = """let ([a-zA-Z_]\w*) = (.+) in""".r
+    val withInPattern = """let ([a-zA-Z_]\w*) = (.+?) in(?:\s*\()?\s*""".r
     val plainPattern = """let ([a-zA-Z_]\w*) = (.+)""".r
 
     line.trim match {
       case withInPattern(name, expr) =>
-        s"val $name = ${translateExpression(expr)}"
+        renderLocalBinding(name, expr)
       case plainPattern(name, expr) =>
-        s"val $name = ${translateExpression(expr)}"
+        renderLocalBinding(name, expr)
       case _ =>
         "// Could not translate local let: " + line.trim
     }
@@ -312,6 +332,17 @@ object Main {
   def translatePrintEndline(line: String): String = {
     val content = line.trim.stripPrefix("print_endline").trim
     "println(" + translateExpression(content) + ")"
+  }
+
+  def translateAssignment(line: String): String = {
+    val pattern = """([a-zA-Z_]\w*)\s*:=\s*(.+)""".r
+
+    normalizeStatementLine(line) match {
+      case pattern(name, expr) =>
+        s"$name = ${translateExpression(expr)}"
+      case _ =>
+        "// Could not translate assignment: " + line.trim
+    }
   }
 
   def translatePrintf(line: String): String = {
@@ -399,11 +430,21 @@ object Main {
   }
 
   def translateExpression(expr: String): String = {
-    val cleaned = cleanLineEnding(expr.trim)
-    val withPrint = cleaned.replace("print_endline", "println")
-    val withBooleanTrue = withPrint.replace("true", "true")
-    val withBooleanFalse = withBooleanTrue.replace("false", "false")
-    translateFunctionCalls(withBooleanFalse)
+    val cleaned = normalizeStatementLine(expr)
+    val withoutRefKeyword =
+      if (cleaned.startsWith("ref ")) cleaned.stripPrefix("ref ").trim
+      else cleaned
+
+    val withPrint = withoutRefKeyword.replace("print_endline", "println")
+    val withDereference = withPrint.replaceAll("""!([a-zA-Z_]\w*)""", "$1")
+    val withParenthesizedCalls = translateFunctionCalls(withDereference)
+    val withBareCalls = translateBareFunctionCalls(withParenthesizedCalls)
+    val withStringConversions = translateStringConversions(withBareCalls)
+    val withConcatenation = withStringConversions.replace("^", " + ")
+    val withModulo = withConcatenation.replaceAll("""\bmod\b""", "%")
+    val withNotEqual = withModulo.replace("<>", "!=")
+
+    translateEqualityOperators(withNotEqual)
   }
 
   // Change OCaml calls like "factorial (n - 1)" into Scala calls like "factorial(n - 1)".
@@ -418,6 +459,386 @@ object Main {
     }
 
     result
+  }
+
+  def translateBareFunctionCalls(text: String): String = {
+    val reservedWords = Set("if", "then", "else", "let", "while", "done", "ref", "val", "var", "println", "mod")
+    val bareCallPattern = """\b([a-zA-Z_]\w*)\s+("([^"\\]|\\.)*"|\([^()]+\)|![a-zA-Z_]\w*|[a-zA-Z_]\w*)""".r
+    val stringArgumentPattern = """\b([a-zA-Z_]\w*)\s+("([^"\\]|\\.)*")""".r
+    var result = text
+    var changed = true
+
+    while (changed) {
+      val withStringArguments = stringArgumentPattern.replaceAllIn(result, m => {
+        val name = m.group(1)
+        val argument = m.group(2)
+
+        if (
+          reservedWords.contains(name) ||
+          isInsideStringLiteral(result, m.start(1)) ||
+          resultLiftLooksLikeDefinition(result, m.start(1))
+        ) m.matched
+        else s"$name($argument)"
+      })
+
+      val updated = transformOutsideStrings(withStringArguments, segment =>
+        bareCallPattern.replaceAllIn(segment, m => {
+          val name = m.group(1)
+          val argument = m.group(2)
+
+          if (
+            reservedWords.contains(name) ||
+            reservedWords.contains(argument) ||
+            resultLiftLooksLikeDefinition(segment, m.start(1))
+          ) m.matched
+          else s"$name($argument)"
+        })
+      )
+
+      changed = updated != result
+      result = updated
+    }
+
+    result
+  }
+
+  def translateStringConversions(text: String): String = {
+    var result = text
+    var changed = true
+
+    while (changed) {
+      val updated = result
+        .replaceAll("""string_of_int\(([^()]+)\)""", "($1).toString")
+        .replaceAll("""string_of_int\s+([a-zA-Z_]\w*)""", "$1.toString")
+
+      changed = updated != result
+      result = updated
+    }
+
+    result
+  }
+
+  def translateEqualityOperators(text: String): String = {
+    val result = new StringBuilder
+    var index = 0
+    var insideString = false
+
+    while (index < text.length) {
+      val current = text.charAt(index)
+
+      if (current == '"' && (index == 0 || text.charAt(index - 1) != '\\')) {
+        insideString = !insideString
+        result.append(current)
+      } else if (!insideString && current == '=') {
+        val previous = if (index > 0) text.charAt(index - 1) else '\u0000'
+        val next = if (index + 1 < text.length) text.charAt(index + 1) else '\u0000'
+        val isComparison = !Set(':', '<', '>', '!', '=').contains(previous) && next != '='
+
+        if (isComparison) result.append("==")
+        else result.append(current)
+      } else {
+        result.append(current)
+      }
+
+      index += 1
+    }
+
+    result.toString()
+  }
+
+  def isInsideStringLiteral(text: String, targetIndex: Int): Boolean = {
+    var insideString = false
+    var index = 0
+
+    while (index < targetIndex && index < text.length) {
+      val current = text.charAt(index)
+      val isQuote = current == '"' && (index == 0 || text.charAt(index - 1) != '\\')
+
+      if (isQuote) {
+        insideString = !insideString
+      }
+
+      index += 1
+    }
+
+    insideString
+  }
+
+  def transformOutsideStrings(text: String, transform: String => String): String = {
+    val result = new StringBuilder
+    val segment = new StringBuilder
+    var insideString = false
+    var index = 0
+
+    while (index < text.length) {
+      val current = text.charAt(index)
+      val isQuote = current == '"' && (index == 0 || text.charAt(index - 1) != '\\')
+
+      if (isQuote && insideString) {
+        segment.append(current)
+        result.append(segment.toString())
+        segment.clear()
+        insideString = false
+      } else if (isQuote) {
+        result.append(transform(segment.toString()))
+        segment.clear()
+        segment.append(current)
+        insideString = true
+      } else {
+        segment.append(current)
+      }
+
+      index += 1
+    }
+
+    if (segment.nonEmpty) {
+      if (insideString) result.append(segment.toString())
+      else result.append(transform(segment.toString()))
+    }
+
+    result.toString()
+  }
+
+  def normalizeStatementLine(line: String): String = {
+    var normalized = cleanLineEnding(line.trim)
+
+    while (
+      normalized.endsWith(")") &&
+      normalized.count(_ == '(') < normalized.count(_ == ')')
+    ) {
+      normalized = normalized.dropRight(1).trim
+    }
+
+    normalized
+  }
+
+  def translateStatementSequence(
+      lines: List[String],
+      startIndex: Int,
+      stopAtDone: Boolean
+  ): (List[String], Int) = {
+    val translated = scala.collection.mutable.ListBuffer[String]()
+    var index = startIndex
+
+    while (index < lines.length) {
+      val line = normalizeStatementLine(lines(index))
+
+      if (line.isEmpty || line == "(" || line == ")") {
+        index += 1
+      } else if (stopAtDone && line == "done") {
+        return (translated.toList, index + 1)
+      } else if (line.startsWith("while ")) {
+        val whilePattern = """while (.+) do""".r
+
+        line match {
+          case whilePattern(condition) =>
+            val (body, nextIndex) = translateStatementSequence(lines, index + 1, stopAtDone = true)
+            translated += s"while (${translateExpression(condition)}) {"
+            translated ++= body.map("  " + _)
+            translated += "}"
+            index = nextIndex
+
+          case _ =>
+            translated += "// Could not translate while loop: " + line
+            index += 1
+        }
+      } else if (line.startsWith("if ")) {
+        val (ifLines, nextIndex) = translateIfStatement(lines, index)
+        translated ++= ifLines
+        index = nextIndex
+      } else {
+        translated += translateStandaloneStatement(line)
+        index += 1
+      }
+    }
+
+    (translated.toList, index)
+  }
+
+  def translateIfStatement(lines: List[String], startIndex: Int): (List[String], Int) = {
+    val line = normalizeStatementLine(lines(startIndex))
+    val inlineIfElsePattern = """if (.+) then (.+) else (.+)""".r
+    val inlineIfPattern = """if (.+) then (.+)""".r
+    val multilineIfPattern = """if (.+) then""".r
+
+    line match {
+      case inlineIfElsePattern(condition, whenTrue, whenFalse) =>
+        (
+          List(
+            s"if (${translateExpression(condition)}) {",
+            "  " + translateStandaloneStatement(whenTrue),
+            "} else {",
+            "  " + translateStandaloneStatement(whenFalse),
+            "}"
+          ),
+          startIndex + 1
+        )
+
+      case multilineIfPattern(condition) =>
+        val nextLine =
+          if (startIndex + 1 < lines.length) normalizeStatementLine(lines(startIndex + 1))
+          else ""
+
+        if (nextLine.endsWith(" else")) {
+          val whenTrue = normalizeStatementLine(nextLine.stripSuffix("else").trim)
+          val whenFalse =
+            if (startIndex + 2 < lines.length) normalizeStatementLine(lines(startIndex + 2))
+            else ""
+
+          (
+            List(
+              s"if (${translateExpression(condition)}) {",
+              "  " + translateStandaloneStatement(whenTrue),
+              "} else {",
+              "  " + translateStandaloneStatement(whenFalse),
+              "}"
+            ),
+            startIndex + 3
+          )
+        } else {
+          (
+            List(
+              s"if (${translateExpression(condition)}) {",
+              "  " + translateStandaloneStatement(nextLine),
+              "}"
+            ),
+            startIndex + 2
+          )
+        }
+
+      case inlineIfPattern(condition, whenTrue) =>
+        (List(s"if (${translateExpression(condition)}) ${translateExpression(whenTrue)}"), startIndex + 1)
+
+      case _ =>
+        (List("// Could not translate if expression: " + line), startIndex + 1)
+    }
+  }
+
+  def translateStandaloneStatement(line: String): String = {
+    val normalized = normalizeStatementLine(line)
+
+    if (normalized.startsWith("let ")) {
+      translateLocalLet(normalized)
+    } else if (normalized.startsWith("Printf.printf")) {
+      translatePrintf(normalized)
+    } else if (normalized.startsWith("print_endline")) {
+      translatePrintEndline(normalized)
+    } else if (normalized.contains(":=")) {
+      translateAssignment(normalized)
+    } else {
+      translateExpression(normalized)
+    }
+  }
+
+  def renderLocalBinding(name: String, expr: String): String = {
+    val cleanedExpr = normalizeStatementLine(expr)
+
+    if (cleanedExpr.startsWith("ref ")) {
+      s"var $name = ${translateExpression(cleanedExpr.stripPrefix("ref ").trim)}"
+    } else {
+      s"val $name = ${translateExpression(cleanedExpr)}"
+    }
+  }
+
+  def countGroupingDelta(line: String): Int = {
+    line.count(_ == '(') - line.count(_ == ')')
+  }
+
+  def isMainDefinition(header: String): Boolean = {
+    header.matches("""let\s+main\s*\(\s*\)\s*(?::\s*[^=]+)?=\s*.*""")
+  }
+
+  def isMainInvocation(header: String): Boolean = {
+    header.matches("""let\s+(?:_|\(\))\s*=\s*main\s*\(\s*\)\s*""")
+  }
+
+  case class FunctionSignature(
+      name: String,
+      paramName: String,
+      paramType: String,
+      returnType: String,
+      inlineExpression: Option[String]
+  )
+
+  def parseFunctionHeader(header: String, isRecursive: Boolean): Option[FunctionSignature] = {
+    val prefix = if (isRecursive) "let rec " else "let "
+    val typedPattern =
+      (prefix + """([a-zA-Z_]\w*)\s+\(([a-zA-Z_]\w*)\s*:\s*([a-zA-Z_]\w*)\)\s*(?::\s*([a-zA-Z_]\w*))?\s*=\s*(.*)""").r
+    val simplePattern =
+      (prefix + """([a-zA-Z_]\w*)\s+([a-zA-Z_]\w*)\s*(?::\s*([a-zA-Z_]\w*))?\s*=\s*(.*)""").r
+
+    header match {
+      case typedPattern(name, paramName, paramType, returnType, inlineExpr) =>
+        Some(
+          FunctionSignature(
+            name,
+            paramName,
+            mapOcamlType(paramType),
+            mapOcamlTypeOption(returnType).getOrElse("Int"),
+            optionalInlineExpression(inlineExpr)
+          )
+        )
+
+      case simplePattern(name, paramName, returnType, inlineExpr) =>
+        Some(
+          FunctionSignature(
+            name,
+            paramName,
+            "Int",
+            mapOcamlTypeOption(returnType).getOrElse("Int"),
+            optionalInlineExpression(inlineExpr)
+          )
+        )
+
+      case _ =>
+        None
+    }
+  }
+
+  def renderFunction(
+      name: String,
+      paramName: String,
+      paramType: String,
+      returnType: String,
+      bodyLines: List[String]
+  ): List[String] = {
+    val translatedBody = bodyLines.flatMap(translateBodyLine)
+
+    if (translatedBody.length == 1) {
+      List(s"def $name($paramName: $paramType): $returnType = ${translatedBody.head}")
+    } else {
+      List(s"def $name($paramName: $paramType): $returnType = {") ++
+        translatedBody.map("  " + _) ++
+        List("}")
+    }
+  }
+
+  def bodyFromHeader(inlineExpression: Option[String]): Option[List[String]] = {
+    inlineExpression.map(expr => List(expr).filter(_.trim.nonEmpty))
+  }
+
+  def optionalInlineExpression(text: String): Option[String] = {
+    Option(text.trim).filter(_.nonEmpty)
+  }
+
+  def mapOcamlTypeOption(ocamlType: String): Option[String] = {
+    Option(ocamlType).map(_.trim).filter(_.nonEmpty).map(mapOcamlType)
+  }
+
+  def mapOcamlType(ocamlType: String): String = {
+    ocamlType.trim match {
+      case "int"    => "Int"
+      case "string" => "String"
+      case "bool"   => "Boolean"
+      case "float"  => "Double"
+      case "unit"   => "Unit"
+      case other    => other
+    }
+  }
+
+  def resultLiftLooksLikeDefinition(text: String, startIndex: Int): Boolean = {
+    val prefix = text.take(startIndex).trim
+    prefix.endsWith("def") || prefix.endsWith("val") || prefix.endsWith("var")
   }
 
   def cleanLineEnding(line: String): String = {
